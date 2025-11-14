@@ -1,0 +1,299 @@
+-- 🌻 Girrasol Hub - Fix TP (Feito por Vitozx)
+-- LocalScript (StarterPlayerScripts)
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
+
+-- utility tween
+local function quickFlash(btn, txt)
+	local old = btn.Text
+	btn.Text = txt
+	TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundTransparency = 0.15}):Play()
+	task.delay(0.45, function()
+		if btn and btn.Parent then
+			btn.Text = old
+			TweenService:Create(btn, TweenInfo.new(0.12), {BackgroundTransparency = 0.25}):Play()
+		end
+	end)
+end
+
+-- ScreenGui
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "GirrasolHub"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+-- Som inicial (opcional)
+local sound = Instance.new("Sound")
+sound.SoundId = "rbxassetid://17620645740"
+sound.Volume = 1.5
+sound.Parent = screenGui
+pcall(function() sound:Play() end)
+
+-- Frame principal
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 500, 0, 320)
+mainFrame.Position = UDim2.new(0.5, -250, 0.5, -160)
+mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+mainFrame.BackgroundTransparency = 0.3
+mainFrame.BorderSizePixel = 0
+mainFrame.Visible = false
+mainFrame.Active = true
+mainFrame.Draggable = true
+mainFrame.Parent = screenGui
+
+-- Fundo com imagem
+local bgImage = Instance.new("ImageLabel")
+bgImage.Name = "BackgroundImage"
+bgImage.Size = UDim2.new(1, 0, 1, 0)
+bgImage.BackgroundTransparency = 1
+bgImage.Image = "rbxassetid://9868265045"
+bgImage.ImageTransparency = 0.25
+bgImage.ScaleType = Enum.ScaleType.Crop
+bgImage.Parent = mainFrame
+
+-- Título
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 40)
+title.Position = UDim2.new(0,0,0,0)
+title.BackgroundTransparency = 0.45
+title.BackgroundColor3 = Color3.fromRGB(255,215,0)
+title.Text = "🌻 Girrasol Hub - Feito por Vitozx 🌻"
+title.TextColor3 = Color3.fromRGB(30, 30, 30)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 18
+title.Parent = mainFrame
+
+-- Close (usa openButton depois)
+local closeButton = Instance.new("TextButton")
+closeButton.Size = UDim2.new(0, 30, 0, 30)
+closeButton.Position = UDim2.new(1, -35, 0, 5)
+closeButton.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+closeButton.Text = "X"
+closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeButton.Font = Enum.Font.GothamBold
+closeButton.TextSize = 18
+closeButton.Parent = mainFrame
+
+-- Content holder
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -20, 1, -50)
+content.Position = UDim2.new(0, 10, 0, 45)
+content.BackgroundTransparency = 1
+content.Parent = mainFrame
+
+local layout = Instance.new("UIListLayout")
+layout.Parent = content
+layout.Padding = UDim.new(0, 6)
+
+-- Save/TP Buttons area
+local function makeButton(name)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, 35)
+	btn.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+	btn.BackgroundTransparency = 0.25
+	btn.TextColor3 = Color3.fromRGB(0, 0, 0)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 18
+	btn.Text = name
+	btn.Parent = content
+	btn.AutoButtonColor = true
+	btn.BorderSizePixel = 0
+	return btn
+end
+
+local tp1Btn = makeButton("TP 1")
+local tp2Btn = makeButton("TP 2")
+local save1Btn = makeButton("Salvar 1")
+local save2Btn = makeButton("Salvar 2")
+
+-- saved positions table
+local savedPositions = { [1] = nil, [2] = nil }
+
+-- helper to get HumanoidRootPart safely
+local function getHRP()
+	if not player.Character then return nil end
+	local hrp = player.Character:FindFirstChild("HumanoidRootPart") or player.Character:FindFirstChild("Torso") or player.Character:FindFirstChild("UpperTorso")
+	return hrp
+end
+
+-- Save handlers
+save1Btn.MouseButton1Click:Connect(function()
+	local hrp = getHRP()
+	if hrp then
+		savedPositions[1] = hrp.CFrame
+		quickFlash(save1Btn, "Salvo ✓")
+	else
+		quickFlash(save1Btn, "Sem char")
+	end
+end)
+
+save2Btn.MouseButton1Click:Connect(function()
+	local hrp = getHRP()
+	if hrp then
+		savedPositions[2] = hrp.CFrame
+		quickFlash(save2Btn, "Salvo ✓")
+	else
+		quickFlash(save2Btn, "Sem char")
+	end
+end)
+
+-- Teleport handlers (teleport safely using CFrame)
+tp1Btn.MouseButton1Click:Connect(function()
+	if savedPositions[1] then
+		local hrp = getHRP()
+		if hrp then
+			-- tentativa segura: set CFrame preserving orientation
+			hrp.CFrame = savedPositions[1]
+			quickFlash(tp1Btn, "TP ✓")
+		else
+			quickFlash(tp1Btn, "Sem char")
+		end
+	else
+		quickFlash(tp1Btn, "Nenhum")
+	end
+end)
+
+tp2Btn.MouseButton1Click:Connect(function()
+	if savedPositions[2] then
+		local hrp = getHRP()
+		if hrp then
+			hrp.CFrame = savedPositions[2]
+			quickFlash(tp2Btn, "TP ✓")
+		else
+			quickFlash(tp2Btn, "Sem char")
+		end
+	else
+		quickFlash(tp2Btn, "Nenhum")
+	end
+end)
+
+-- Spy (mantive funcionalidade simples)
+local spyFrame = Instance.new("Frame")
+spyFrame.Size = UDim2.new(1,0,0,35)
+spyFrame.BackgroundTransparency = 1
+spyFrame.Parent = content
+
+local playerDropdown = Instance.new("TextButton")
+playerDropdown.Size = UDim2.new(0.7, 0, 1, 0)
+playerDropdown.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+playerDropdown.BackgroundTransparency = 0.25
+playerDropdown.TextColor3 = Color3.fromRGB(0, 0, 0)
+playerDropdown.Font = Enum.Font.GothamBold
+playerDropdown.TextSize = 18
+playerDropdown.Text = "Selecionar Player"
+playerDropdown.Parent = spyFrame
+
+local spyButton = Instance.new("TextButton")
+spyButton.Size = UDim2.new(0.25, 0, 1, 0)
+spyButton.Position = UDim2.new(0.75, 5, 0, 0)
+spyButton.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
+spyButton.BackgroundTransparency = 0.25
+spyButton.TextColor3 = Color3.fromRGB(0, 0, 0)
+spyButton.Font = Enum.Font.GothamBold
+spyButton.TextSize = 18
+spyButton.Text = "Spy"
+spyButton.Parent = spyFrame
+
+local dropFrame = Instance.new("Frame")
+dropFrame.Size = UDim2.new(0.7, 0, 0, 120)
+dropFrame.Position = UDim2.new(0, 0, 1, 0)
+dropFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+dropFrame.BackgroundTransparency = 0.9
+dropFrame.Visible = false
+dropFrame.Parent = spyFrame
+
+local listLayout = Instance.new("UIListLayout", dropFrame)
+
+local selectedTarget = nil
+local function rebuildPlayerList()
+	for _, c in ipairs(dropFrame:GetChildren()) do
+		if c:IsA("TextButton") then c:Destroy() end
+	end
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player then
+			local b = Instance.new("TextButton")
+			b.Size = UDim2.new(1, 0, 0, 26)
+			b.BackgroundTransparency = 1
+			b.TextColor3 = Color3.fromRGB(0,0,0)
+			b.Font = Enum.Font.Gotham
+			b.TextSize = 14
+			b.Text = p.Name
+			b.Parent = dropFrame
+			b.MouseButton1Click:Connect(function()
+				playerDropdown.Text = p.Name
+				selectedTarget = p
+				dropFrame.Visible = false
+			end)
+		end
+	end
+end
+
+Players.PlayerAdded:Connect(rebuildPlayerList)
+Players.PlayerRemoving:Connect(function(r)
+	-- se o target saiu, limpa e volta camera pro player
+	if selectedTarget == r then
+		selectedTarget = nil
+		if player.Character and player.Character:FindFirstChildWhichIsA("Humanoid") then
+			camera.CameraSubject = player.Character:FindFirstChildWhichIsA("Humanoid")
+		end
+	end
+	rebuildPlayerList()
+end)
+rebuildPlayerList()
+
+playerDropdown.MouseButton1Click:Connect(function()
+	dropFrame.Visible = not dropFrame.Visible
+end)
+
+local spying = false
+spyButton.MouseButton1Click:Connect(function()
+	if spying then
+		-- desativa spy: volta câmera
+		if player.Character and player.Character:FindFirstChildWhichIsA("Humanoid") then
+			camera.CameraSubject = player.Character:FindFirstChildWhichIsA("Humanoid")
+		end
+		spying = false
+		spyButton.Text = "Spy"
+	else
+		if selectedTarget and selectedTarget.Character and selectedTarget.Character:FindFirstChildWhichIsA("Humanoid") then
+			camera.CameraSubject = selectedTarget.Character:FindFirstChildWhichIsA("Humanoid")
+			spying = true
+			spyButton.Text = "Desativar"
+		end
+	end
+end)
+
+-- Open button (menor)
+local openButton = Instance.new("ImageButton")
+openButton.Name = "OpenHubButton"
+openButton.Size = UDim2.new(0, 60, 0, 60)
+openButton.Position = UDim2.new(0, 15, 0.5, -30)
+openButton.BackgroundTransparency = 1
+openButton.Image = "rbxassetid://11124255350"
+openButton.Parent = screenGui
+openButton.Active = true
+openButton.Draggable = true
+
+openButton.MouseButton1Click:Connect(function()
+	mainFrame.Visible = true
+	openButton.Visible = false
+end)
+
+closeButton.MouseButton1Click:Connect(function()
+	mainFrame.Visible = false
+	openButton.Visible = true
+end)
+
+-- Se o jogador reaparecer, garante camera pro player quando spy não ativo
+player.CharacterAdded:Connect(function(char)
+	task.wait(0.5)
+	if not spying then
+		local h = char:FindFirstChildWhichIsA("Humanoid")
+		if h then camera.CameraSubject = h end
+	end
+end)
