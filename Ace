@@ -1,0 +1,559 @@
+local cloneref = cloneref or function(object) return object end
+local Players           = cloneref(game:GetService("Players"))
+local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
+local RunService        = cloneref(game:GetService("RunService"))
+local UserInputService  = cloneref(game:GetService("UserInputService"))
+local HttpService       = cloneref(game:GetService("HttpService"))
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+if getgenv and getgenv().StopAura then pcall(getgenv().StopAura) end
+
+-- CONFIGURATION SYSTEM --
+local CONFIG_FILE = "ace_code_sniper_auto_redeem_test_config.json"
+local savedConfig = {
+    codeSniper = true,
+    autoSubmit = true,
+    submitAfter = 3,
+    retypeInvalid = false,
+    riddleSolver = false,
+}
+pcall(function()
+    if type(isfile) == "function" and type(readfile) == "function"
+    and isfile(CONFIG_FILE) then
+        local decoded = HttpService:JSONDecode(readfile(CONFIG_FILE))
+        if type(decoded) == "table" then
+            if type(decoded.codeSniper) == "boolean" then savedConfig.codeSniper = decoded.codeSniper end
+            if type(decoded.autoSubmit) == "boolean" then savedConfig.autoSubmit = decoded.autoSubmit end
+            if type(decoded.submitAfter) == "number" then savedConfig.submitAfter = math.max(1, math.floor(decoded.submitAfter)) end
+            if type(decoded.retypeInvalid) == "boolean" then savedConfig.retypeInvalid = decoded.retypeInvalid end
+            if type(decoded.riddleSolver) == "boolean" then savedConfig.riddleSolver = decoded.riddleSolver end
+        end
+    end
+end)
+
+local function saveConfig()
+    if type(writefile) ~= "function" then return end
+    pcall(function()
+        writefile(CONFIG_FILE, HttpService:JSONEncode({
+            codeSniper = savedConfig.codeSniper,
+            autoSubmit = savedConfig.autoSubmit,
+            submitAfter = savedConfig.submitAfter,
+            retypeInvalid = savedConfig.retypeInvalid,
+            riddleSolver = savedConfig.riddleSolver,
+        }))
+    end)
+end
+
+-- STATE VARIABLES --
+local _enabled              = savedConfig.codeSniper
+local _seen                 = {}
+local _focused              = nil
+local _lastBox              = nil
+local _autoAccept           = savedConfig.autoSubmit
+local _submitAfter          = savedConfig.submitAfter
+local _capturedParts        = {}
+local _lastWatchedBox       = nil
+local _boxTextConn          = nil
+local _boxAncestryConn      = nil
+local _boxVisibilityConns   = {}
+local _retypeInvalid        = savedConfig.retypeInvalid
+local _riddleSolver         = savedConfig.riddleSolver
+local _lastNonBlankBoxText  = ""
+local _pendingRejectedText  = nil
+local _pendingRejectedBox   = nil
+local _pendingRejectedUntil = 0
+local _pendingRejectedToken = 0
+local ACE_CASE_MODE         = "EXACT"
+local ACE_WORD_COUNT        = 1
+
+local getupvalues = (debug and debug.getupvalues) or getupvalues
+local getconns    = getconnections or (debug and debug.getconnections)
+local setupv      = (debug and debug.setupvalue) or setupvalue
+
+local setStatus, flashCode, appendToBox
+local rememberPendingSubmission, clearPendingSubmission, handleRedemptionFeedback
+local clearAceCapture
+local _lastStatusMsg = nil
+
+-- UTILITY & REDEEM LOGIC --
+local function isOurGui(instance)
+    local p = instance
+    for _ = 1, 10 do
+        if not p then break end
+        if p.Name == "ACECodeSniperUI" or p.Name == "SourcesHubRedeemerGui" then return true end
+        p = p.Parent
+    end
+    return false
+end
+
+local function isVisibleChain(inst)
+    local current = inst
+    while current do
+        if current:IsA("GuiObject") and not current.Visible then return false end
+        if current:IsA("ScreenGui") then return current.Enabled end
+        current = current.Parent
+    end
+    return true
+end
+
+local function findAllTextBoxes(pg)
+    local boxes = {}
+    for _, gui in ipairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled and not isOurGui(gui) then
+            for _, d in ipairs(gui:GetDescendants()) do
+                if d:IsA("TextBox") and not isOurGui(d) then
+                    boxes[#boxes+1] = d
+                end
+            end
+        end
+    end
+    return boxes
+end
+
+local function findCodeButtons(pg)
+    local btns = {}
+    for _, gui in ipairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled and not isOurGui(gui) then
+            for _, d in ipairs(gui:GetDescendants()) do
+                if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) then
+                    local n  = d.Name:lower()
+                    local pn = (d.Parent and d.Parent.Name or ""):lower()
+                    if (n:find("code") or n:find("redeem") or pn:find("code") or pn:find("redeem"))
+                        and isVisibleChain(d) then
+                        btns[#btns+1] = d
+                    end
+                end
+            end
+        end
+    end
+    return btns
+end
+
+local function clickButton(btn)
+    if not btn then return false end
+    local methods = {}
+    
+    methods[#methods+1] = function() btn.MouseButton1Click:Fire() end
+    methods[#methods+1] = function() btn.Activated:Fire() end
+    
+    if typeof(firesignal) == "function" then
+        methods[#methods+1] = function() firesignal(btn.MouseButton1Click) end
+        methods[#methods+1] = function() firesignal(btn.Activated) end
+    end
+    
+    if typeof(getconns) == "function" then
+        methods[#methods+1] = function()
+            local ok, cs = pcall(getconns, btn.MouseButton1Click)
+            if ok and type(cs) == "table" then
+                for _, c in ipairs(cs) do pcall(function() c:Fire() end) end
+            end
+            local ok2, cs2 = pcall(getconns, btn.Activated)
+            if ok2 and type(cs2) == "table" then
+                for _, c in ipairs(cs2) do pcall(function() c:Fire() end) end
+            end
+        end
+    end
+    
+    if typeof(fireclick) == "function" then
+        methods[#methods+1] = function() fireclick(btn) end
+    end
+    
+    local anyOk = false
+    for _, fn in ipairs(methods) do
+        local ok = pcall(fn)
+        anyOk = anyOk or ok
+    end
+    return anyOk
+end
+
+local function fireBoxFocusLost(box)
+    if not box then return false end
+    local anyFired = false
+    
+    if typeof(firesignal) == "function" then
+        local ok = pcall(firesignal, box.FocusLost, true)
+        anyFired = anyFired or ok
+    end
+    
+    if typeof(getconns) == "function" then
+        local ok, cs = pcall(getconns, box.FocusLost)
+        if ok and type(cs) == "table" then
+            for _, c in ipairs(cs) do
+                local fn
+                pcall(function() fn = c.Function end)
+                if fn and typeof(getupvalues) == "function" and typeof(setupv) == "function" then
+                    local uOk, ups = pcall(getupvalues, fn)
+                    if uOk and type(ups) == "table" then
+                        for i, v in pairs(ups) do
+                            if type(v) == "boolean" and v == true then
+                                pcall(setupv, fn, i, false)
+                            end
+                        end
+                    end
+                end
+                local fOk = pcall(function()
+                    if c.Enabled ~= false then c:Fire(true) end
+                end)
+                anyFired = anyFired or fOk
+            end
+        end
+    end
+    
+    return anyFired
+end
+
+local function typeAndSubmitCode(code)
+    local pg = playerGui or player:FindFirstChildOfClass("PlayerGui")
+    if not pg then return false, "no PlayerGui" end
+
+    -- Strategy 1: Known UI path
+    local codesGui = pg:FindFirstChild("Codes")
+    if codesGui then
+        if codesGui:IsA("ScreenGui") then codesGui.Enabled = true end
+        local codesFrame = codesGui:FindFirstChild("Codes") or codesGui
+        if codesFrame then
+            if codesFrame:IsA("GuiObject") then codesFrame.Visible = true end
+            local cur = codesFrame
+            while cur and cur ~= codesGui do
+                if cur:IsA("GuiObject") then cur.Visible = true end
+                cur = cur.Parent
+            end
+
+            local box = nil
+            for _, d in ipairs(codesFrame:GetDescendants()) do
+                if d:IsA("TextBox") and not isOurGui(d) then
+                    box = d
+                    break
+                end
+            end
+
+            local submitBtn = nil
+            for _, d in ipairs(codesFrame:GetDescendants()) do
+                if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) then
+                    local n = d.Name:lower()
+                    local txt = ""
+                    pcall(function() txt = d.Text:lower() end)
+                    if n:find("submit") or txt:find("submit") or n:find("redeem") or txt:find("redeem") or n:find("claim") or txt:find("confirm") or n:find("enter") then
+                        submitBtn = d
+                        break
+                    end
+                end
+            end
+            if not submitBtn then
+                for _, d in ipairs(codesFrame:GetDescendants()) do
+                    if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) then
+                        local n = d.Name:lower()
+                        if not n:find("close") and not n:find("x") and not n:find("toggle") then
+                            submitBtn = d
+                            break
+                        end
+                    end
+                end
+            end
+
+            if box then
+                pcall(function() box.Text = code end)
+                task.wait(0.05)
+                if submitBtn then clickButton(submitBtn) end
+                fireBoxFocusLost(box)
+                return true, "submitted via PlayerGui.Codes"
+            end
+        end
+    end
+
+    -- Strategy 2: Dynamic Search
+    local btns = findCodeButtons(pg)
+    for _, btn in ipairs(btns) do
+        clickButton(btn)
+        task.wait(0.05)
+    end
+
+    task.wait(0.2)
+
+    local box = nil
+    local deadline = tick() + 2
+    while tick() < deadline do
+        local allBoxes = findAllTextBoxes(pg)
+        for _, d in ipairs(allBoxes) do
+            if isVisibleChain(d) then
+                local n  = d.Name:lower()
+                local pn = (d.Parent and d.Parent.Name or ""):lower()
+                if n:find("code") or pn:find("code") or n:find("redeem") or pn:find("redeem") or n:find("input") or pn:find("textbox") or n:find("enter") then
+                    box = d
+                    break
+                end
+            end
+        end
+        if not box then
+            for _, d in ipairs(allBoxes) do
+                if isVisibleChain(d) then box = d; break end
+            end
+        end
+        if box then break end
+        task.wait(0.1)
+    end
+
+    if not box then return false, "no codebox visible" end
+
+    pcall(function() box.Text = code end)
+    task.wait(0.05)
+
+    local redeemBtn = nil
+    local searchNames = {"submit","redeem","claim","confirm","enter","send","apply","ok","use","go","check"}
+    local p = box.Parent
+    for _ = 1, 8 do
+        if not p then break end
+        for _, d in ipairs(p:GetDescendants()) do
+            if (d:IsA("TextButton") or d:IsA("ImageButton")) and not isOurGui(d) and d ~= box then
+                local n = d.Name:lower()
+                local txt = ""
+                pcall(function() txt = d.Text:lower() end)
+                for _, sn in ipairs(searchNames) do
+                    if n:find(sn) or txt:find(sn) then
+                        if isVisibleChain(d) then
+                            redeemBtn = d
+                            break
+                        end
+                    end
+                end
+                if redeemBtn then break end
+            end
+        end
+        if redeemBtn then break end
+        p = p.Parent
+    end
+
+    if redeemBtn then clickButton(redeemBtn) end
+    fireBoxFocusLost(box)
+
+    return true, "submitted via dynamic search"
+end
+
+local function aceCodeBox()
+    local pg = playerGui
+    local allBoxes = findAllTextBoxes(pg)
+    for _, box in ipairs(allBoxes) do
+        if isVisibleChain(box) then return box end
+    end
+    return nil
+end
+
+-- STYLING & HELPER UTILITIES --
+local COLORS = {
+    Window = Color3.fromRGB(6, 6, 7),
+    Row = Color3.fromRGB(15, 15, 17),
+    Control = Color3.fromRGB(35, 35, 39),
+    Log = Color3.fromRGB(10, 10, 12),
+    Border = Color3.fromRGB(82, 82, 89),
+    White = Color3.fromRGB(245, 245, 245),
+    Text = Color3.fromRGB(190, 190, 196),
+    Dim = Color3.fromRGB(120, 120, 130),
+    Accent = Color3.fromRGB(245, 245, 245),
+    Green = Color3.fromRGB(70, 210, 100),
+    Red = Color3.fromRGB(255, 70, 70),
+}
+
+local function addCorner(parent, radius)
+    local value = Instance.new("UICorner")
+    value.CornerRadius = UDim.new(0, radius)
+    value.Parent = parent
+    return value
+end
+
+local function addStroke(parent, color, thickness, transparency)
+    local value = Instance.new("UIStroke")
+    value.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    value.Color = color
+    value.Thickness = thickness or 1
+    value.Transparency = transparency or 0
+    value.Parent = parent
+    return value
+end
+
+local function makeLabel(parent, name, text, size, position, textSize, color, font)
+    local label = Instance.new("TextLabel")
+    label.Name = name
+    label.Size = size
+    label.Position = position
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextSize = textSize
+    label.TextColor3 = color
+    label.Font = font or Enum.Font.GothamMedium
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.Parent = parent
+    return label
+end
+
+-- CLEANUP OLD GUIS --
+pcall(function()
+    for _, name in ipairs({"ACECodeSniperUI", "AutoTypeCodesUI", "ACEPaste"}) do
+        local previous = game.CoreGui:FindFirstChild(name)
+        if previous then previous:Destroy() end
+    end
+end)
+for _, name in ipairs({"ACECodeSniperUI", "AutoTypeCodesUI", "ACEPaste"}) do
+    local previous = playerGui:FindFirstChild(name)
+    if previous then previous:Destroy() end
+end
+
+-- MAIN GUI CREATION --
+local GUI = Instance.new("ScreenGui")
+GUI.Name = "ACECodeSniperUI"
+GUI.ResetOnSpawn = false
+GUI.IgnoreGuiInset = true
+GUI.DisplayOrder = 999
+if not pcall(function() GUI.Parent = game.CoreGui end) then GUI.Parent = playerGui end
+
+local Window = Instance.new("Frame")
+Window.Name = "Window"
+Window.Size = UDim2.fromOffset(310, 370)
+Window.AnchorPoint = Vector2.new(1, 0)
+Window.Position = UDim2.new(1, -8, 0, 8)
+Window.BackgroundColor3 = COLORS.Window
+Window.BorderSizePixel = 0
+Window.ClipsDescendants = true
+Window.Parent = GUI
+addCorner(Window, 14)
+addStroke(Window, COLORS.White, 1, 0.58)
+
+local InterfaceScale = Instance.new("UIScale")
+InterfaceScale.Name = "InterfaceScale"
+InterfaceScale.Scale = 0.92
+InterfaceScale.Parent = Window
+
+local viewportConnection
+local function updateInterfaceScale()
+    local camera = workspace.CurrentCamera
+    if not camera then InterfaceScale.Scale = 0.92; return end
+    local viewport = camera.ViewportSize
+    local fitScale = math.min((viewport.X - 16) / 310, (viewport.Y - 16) / 370)
+    if UserInputService.TouchEnabled then
+        local mobileTarget = 0.72
+        InterfaceScale.Scale = math.max(0.45, math.min(mobileTarget, fitScale))
+    else
+        InterfaceScale.Scale = 0.92
+    end
+end
+
+local function watchViewport()
+    if viewportConnection then viewportConnection:Disconnect(); viewportConnection = nil end
+    local camera = workspace.CurrentCamera
+    if camera then viewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateInterfaceScale) end
+    updateInterfaceScale()
+end
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchViewport)
+watchViewport()
+
+local BackgroundImage = Instance.new("ImageLabel")
+BackgroundImage.Name = "ACEBackground"
+BackgroundImage.Size = UDim2.new(1, 0, 1, 0)
+BackgroundImage.Position = UDim2.fromOffset(0, 0)
+BackgroundImage.BackgroundTransparency = 1
+BackgroundImage.Image = "rbxassetid://137692455767789"
+BackgroundImage.ImageTransparency = 0
+BackgroundImage.ScaleType = Enum.ScaleType.Stretch
+BackgroundImage.ZIndex = 1
+BackgroundImage.Parent = Window
+addCorner(BackgroundImage, 14)
+
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 64)
+Header.BackgroundTransparency = 1
+Header.Active = true
+Header.ZIndex = 3
+Header.Parent = Window
+
+local Console, ConsoleOutput, updateConsoleCanvas
+local featureStates = {}
+local CONSOLE_COLORS = {
+    Dim = "rgb(124,127,135)",
+    Amber = "rgb(214,158,92)",
+    Green = "rgb(105,190,132)",
+    Red = "rgb(218,105,105)",
+    Cyan = "rgb(101,174,183)",
+}
+
+local function scrollConsoleToBottom()
+    task.defer(function()
+        task.wait()
+        if not Console then return end
+        if updateConsoleCanvas then updateConsoleCanvas() end
+        local bottom = math.max(0, Console.AbsoluteCanvasSize.Y - Console.AbsoluteWindowSize.Y)
+        Console.CanvasPosition = Vector2.new(0, bottom)
+    end)
+end
+
+local function appendConsoleStatus(name, activated)
+    if not ConsoleOutput then return end
+    local state = activated and "ON" or "OFF"
+    local stateColor = activated and CONSOLE_COLORS.Green or CONSOLE_COLORS.Red
+    local line = '<font color="' .. CONSOLE_COLORS.Dim .. '">[setting]</font> '
+        .. '<font color="' .. CONSOLE_COLORS.Amber .. '">' .. name .. "</font> "
+        .. '<font color="' .. CONSOLE_COLORS.Dim .. '">-&gt;</font> '
+        .. '<font color="' .. stateColor .. '">' .. state .. "</font>"
+    if ConsoleOutput.Text == "" then ConsoleOutput.Text = line
+    else ConsoleOutput.Text = ConsoleOutput.Text .. "\n\n" .. line end
+    scrollConsoleToBottom()
+end
+
+local BrandMark = Instance.new("Frame")
+BrandMark.Name = "BrandMark"
+BrandMark.Size = UDim2.fromOffset(30, 30)
+BrandMark.Position = UDim2.fromOffset(17, 15)
+BrandMark.BackgroundColor3 = COLORS.Window
+BrandMark.BackgroundTransparency = 1
+BrandMark.BorderSizePixel = 0
+BrandMark.ClipsDescendants = true
+BrandMark.Parent = Header
+addCorner(BrandMark, 15)
+
+local BrandImage = Instance.new("ImageLabel")
+BrandImage.Name = "Logo"
+BrandImage.Size = UDim2.fromScale(1, 1)
+BrandImage.BackgroundTransparency = 1
+BrandImage.Image = "rbxassetid://71891923282375"
+BrandImage.ScaleType = Enum.ScaleType.Fit
+BrandImage.Parent = BrandMark
+addCorner(BrandImage, 15)
+
+makeLabel(Header, "Title", "ACE CODE SNIPER", UDim2.fromOffset(180, 25), UDim2.fromOffset(56, 17), 15, COLORS.White, Enum.Font.GothamBold)
+
+-- TOP RIGHT TOGGLE BUTTON (UPDATED FOR MOBILE & PC) --
+local AutoWriteButton = Instance.new("TextButton")
+AutoWriteButton.Name = "AutoWrite"
+AutoWriteButton.Size = UDim2.fromOffset(47, 24)
+AutoWriteButton.Position = UDim2.new(1, -64, 0, 18)
+AutoWriteButton.BackgroundColor3 = COLORS.Accent
+AutoWriteButton.BorderSizePixel = 0
+AutoWriteButton.AutoButtonColor = false
+AutoWriteButton.Active = true
+AutoWriteButton.Text = ""
+AutoWriteButton.ZIndex = 5
+AutoWriteButton.Parent = Header
+addCorner(AutoWriteButton, 12)
+
+local AutoWriteStroke = addStroke(AutoWriteButton, COLORS.White, 1, 0.62)
+local AutoWriteKnob = Instance.new("Frame")
+AutoWriteKnob.Name = "Knob"
+AutoWriteKnob.Size = UDim2.fromOffset(20, 20)
+AutoWriteKnob.Position = UDim2.new(1, -22, 0.5, -10)
+AutoWriteKnob.BackgroundColor3 = COLORS.Window
+AutoWriteKnob.BorderSizePixel = 0
+AutoWriteKnob.ZIndex = 6
+AutoWriteKnob.Parent = AutoWriteButton
+addCorner(AutoWriteKnob, 10)
+
+local autoWriteEnabled = _enabled
+_enabled = autoWriteEnabled
+AutoWriteButton.BackgroundColor3 = autoWriteEnabled and COLORS.Accent or COLORS.Control
+AutoWriteStroke.Transparency = autoWriteEnabled and 0.62 or 0.88
+AutoWriteKnob.BackgroundColor3 = autoWriteEnabled and COLORS.Window or COLORS.White
+AutoWriteKnob.Position = autoWriteEnabled and UDim2.new(1, -22, 0.5, -10) or UDim2.new(0, 2, 0.5, -10)
+
+local lastToggleTime = 0
+local function toggleAutoWrite()
+    if tick() - lastToggleTime 
